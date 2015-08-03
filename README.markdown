@@ -32,12 +32,10 @@ gem it contains.
 
 Add this to your project's spec\_helper.rb:
 
-    require 'rubygems'
     require 'puppetlabs_spec_helper/module_spec_helper'
 
 Add this to your project's Rakefile:
 
-    require 'rubygems'
     require 'puppetlabs_spec_helper/rake_tasks'
 
 And run the spec tests:
@@ -49,7 +47,7 @@ Issues
 ======
 
 Please file issues against this project at the [Puppet Labs Issue
-Tracker](http://projects.puppetlabs.com/projects/ci-modules)
+Tracker](https://tickets.puppetlabs.com/browse/MODULES)
 
 The Long Version
 ----------------
@@ -96,6 +94,33 @@ NOTE that this is specifically for initializing Puppet's core.  If your project 
 not have any dependencies on puppet and you just want to use the utility classes,
 see the next section.
 
+A number of the Puppet parser features, controlled via configuration during a
+normal puppet run, can be controlled by exporting specific environment
+variables for the spec run. These are:
+
+* ``FUTURE_PARSER`` - set to "yes" to enable the [future parser](http://docs.puppetlabs.com/puppet/latest/reference/experiments_future.html),
+  the equivalent of setting [parser=future](http://docs.puppetlabs.com/references/latest/configuration.html#parser)
+  in puppet.conf.
+* ``STRICT_VARIABLES`` - set to "yes" to enable strict variable checking,
+  the equivalent of setting [strict_variables](http://docs.puppetlabs.com/references/latest/configuration.html#strictvariables)=true
+  in puppet.conf.
+* ``ORDERING`` - set to the desired ordering method ("title-hash", "manifest", or "random")
+  to set the order of unrelated resources when applying a catalog. Leave unset for the default
+  behavior, currently "random". This is equivalent to setting [ordering](http://docs.puppetlabs.com/references/latest/configuration.html#ordering)
+  in puppet.conf.
+* ``STRINGIFY_FACTS`` - set to "no" to enable [structured facts](http://docs.puppetlabs.com/facter/2.0/fact_overview.html#writing-structured-facts),
+  otherwise leave unset to retain the current default behavior. This is equivalent to setting
+  [stringify_facts=false](http://docs.puppetlabs.com/references/latest/configuration.html#stringifyfacts)
+  in puppet.conf.
+* ``TRUSTED_NODE_DATA`` - set to "yes" to enable [the $facts hash and trusted node data](http://docs.puppetlabs.com/puppet/latest/reference/lang_facts_and_builtin_vars.html),
+  which enabled ``$facts`` and ``$trusted`` hashes. This is equivalent to setting
+  [trusted_node_data=true](http://docs.puppetlabs.com/references/latest/configuration.html#trustednodedata)
+  in puppet.conf.
+
+As an example, to run spec tests with the future parser, strict variable checking,
+and manifest ordering, you would:
+
+    FUTURE_PARSER=yes STRICT_VARIABLES=yes ORDERING=manifest rake spec
 
 Using Utility Classes
 =====================
@@ -116,6 +141,24 @@ Using Fixtures
 `spec/fixtures/modules` directory with dependent modules when `rake spec` or
 `rake spec_prep` is run. To do so, all required modules should be listed in a
 file named `.fixtures.yml` in the root of the project.
+
+When specifying the repo source of the fixture you have a few options as to which revision of the codebase you wish to use. 
+
+ * repo - the url to the repo
+ * scm - options include git or hg. This is an optional step as the helper code will figure out which scm is used.
+   ```yaml
+   scm: git
+   scm: hg
+   ```
+ * target - the directory name to clone the repo into ie. `target: mymodule`  defaults to the repo name  (Optional)
+ * ref - used to specify the tag name like version hash of commit (Optional)
+   ```yaml
+   ref: 1.0.0
+   ref: 880fca52c
+   ```
+ * branch - used to specify the branch name you want to use ie. `branch: development`
+ 
+ **Note:** ref and branch can be used together to get a specific revision on a specific branch
 
 Fixtures Examples
 -----------------
@@ -146,6 +189,16 @@ Specify that the git tag `2.4.2` of `stdlib' should be checked out:
           ref: "2.6.0"
       symlinks:
         my_module: "#{source_dir}"
+
+Install modules from Puppet Forge:
+
+    fixtures:
+        forge_modules:
+            firewall: "puppetlabs/firewall"
+            stdlib:
+                repo: "puppetlabs/stdlib"
+                ref: "2.6.0"
+
 
 Testing Parser Functions
 ========================

@@ -7,7 +7,6 @@ ARGV.clear
 ENV['MOCHA_OPTIONS']='skip_integration'
 
 require 'puppet'
-gem 'rspec', '>=2.0.0'
 require 'rspec/expectations'
 require 'mocha/api'
 

@@ -10,6 +10,12 @@ RSpec::Core::RakeTask.new(:spec_standalone) do |t|
   t.pattern = 'spec/{classes,defines,unit,functions,hosts,integration}/**/*_spec.rb'
 end
 
+desc "Run beaker acceptance tests"
+RSpec::Core::RakeTask.new(:beaker) do |t|
+  t.rspec_opts = ['--color']
+  t.pattern = 'spec/acceptance'
+end
+
 desc "Generate code coverage information"
 RSpec::Core::RakeTask.new(:coverage) do |t|
   t.rcov = true
@@ -43,32 +49,98 @@ def fixtures(category)
       elsif opts.instance_of?(Hash)
         target = "spec/fixtures/modules/#{fixture}"
         real_source = eval('"'+opts["repo"]+'"')
-        result[real_source] = { "target" => target, "ref" => opts["ref"] }
+        result[real_source] = { "target" => target, "ref" => opts["ref"], "branch" => opts["branch"], "scm" => opts["scm"] }
       end
     end
   end
   return result
 end
 
+def clone_repo(scm, remote, target, ref=nil, branch=nil)
+  args = []
+  case scm
+  when 'hg'
+    args.push('clone')
+    args.push('-u', ref) if ref
+    args.push(remote, target)
+  when 'git'
+    args.push('clone')
+    args.push('-b', branch) if branch
+    args.push(remote, target)
+  else
+      fail "Unfortunately #{scm} is not supported yet"
+  end
+  system("#{scm} #{args.flatten.join ' '}")
+end
+
+def revision(scm, target, ref)
+  args = []
+  case scm
+  when 'hg'
+    args.push('update', 'clean', '-r', ref)
+  when 'git'
+    args.push('reset', '--hard', ref)
+  else
+      fail "Unfortunately #{scm} is not supported yet"
+  end
+  system("cd #{target} && #{scm} #{args.flatten.join ' '}")
+end
+
 desc "Create the fixtures directory"
 task :spec_prep do
+  # Ruby only sets File::ALT_SEPARATOR on Windows and Rubys standard library
+  # uses this to check for Windows
+  is_windows = !!File::ALT_SEPARATOR
+  puppet_symlink_available = false
+  begin
+    require 'puppet/file_system'
+    puppet_symlink_available = Puppet::FileSystem.respond_to?(:symlink)
+  rescue
+  end
+
+
   fixtures("repositories").each do |remote, opts|
+    scm = 'git'
     if opts.instance_of?(String)
       target = opts
     elsif opts.instance_of?(Hash)
       target = opts["target"]
       ref = opts["ref"]
+      scm = opts["scm"] if opts["scm"]
+      branch = opts["branch"] if opts["branch"]
     end
 
-    unless File::exists?(target) || system("git clone #{remote} #{target}")
-      fail "Failed to clone #{remote} into #{target}"
+    unless File::exists?(target) || clone_repo(scm, remote, target, ref, branch)
+      fail "Failed to clone #{scm} repository #{remote} into #{target}"
     end
-    system("cd #{target} && git reset --hard #{ref}") if ref
+    revision(scm, target, ref) if ref
   end
 
   FileUtils::mkdir_p("spec/fixtures/modules")
   fixtures("symlinks").each do |source, target|
-    File::exists?(target) || FileUtils::ln_sf(source, target)
+    if is_windows
+      fail "Cannot symlink on Windows unless using at least Puppet 3.5" if !puppet_symlink_available
+      Puppet::FileSystem::exist?(target) || Puppet::FileSystem::symlink(source, target)
+    else
+      File::exists?(target) || FileUtils::ln_sf(source, target)
+    end
+  end
+
+  fixtures("forge_modules").each do |remote, opts|
+    if opts.instance_of?(String)
+      target = opts
+      ref = ""
+    elsif opts.instance_of?(Hash)
+      target = opts["target"]
+      ref = "--version #{opts['ref']}"
+    end
+    next if File::exists?(target)
+    unless system("puppet module install " + ref + \
+                  " --ignore-dependencies" \
+                  " --force" \
+                  " --target-dir spec/fixtures/modules #{remote}")
+      fail "Failed to install module #{remote} to #{target}"
+    end
   end
 
   FileUtils::mkdir_p("spec/fixtures/manifests")
@@ -86,10 +158,23 @@ task :spec_clean do
     FileUtils::rm_rf(target)
   end
 
+  fixtures("forge_modules").each do |remote, opts|
+    if opts.instance_of?(String)
+      target = opts
+    elsif opts.instance_of?(Hash)
+      target = opts["target"]
+    end
+    FileUtils::rm_rf(target)
+  end
+
   fixtures("symlinks").each do |source, target|
     FileUtils::rm_f(target)
   end
-  FileUtils::rm_f("spec/fixtures/manifests/site.pp")
+
+  if File.zero?("spec/fixtures/manifests/site.pp")
+    FileUtils::rm_f("spec/fixtures/manifests/site.pp")
+  end
+
 end
 
 desc "Run spec tests in a clean fixtures directory"
@@ -97,6 +182,14 @@ task :spec do
   Rake::Task[:spec_prep].invoke
   Rake::Task[:spec_standalone].invoke
   Rake::Task[:spec_clean].invoke
+end
+
+desc "List available beaker nodesets"
+task :beaker_nodes do
+  Dir['spec/acceptance/nodesets/*.yml'].sort!.select { |node|
+    node.slice!('.yml')
+    puts File.basename(node)
+  }
 end
 
 desc "Build puppet module package"
@@ -119,21 +212,31 @@ end
 desc "Check puppet manifests with puppet-lint"
 task :lint do
   require 'puppet-lint/tasks/puppet-lint'
-  PuppetLint.configuration.ignore_paths = ["spec/fixtures/**/*.pp"]
+  PuppetLint.configuration.relative = true
+  PuppetLint.configuration.disable_class_inherits_from_params_class
+  PuppetLint.configuration.ignore_paths ||= []
+  PuppetLint.configuration.ignore_paths << "spec/fixtures/**/*.pp"
+  PuppetLint.configuration.ignore_paths << "pkg/**/*.pp"
 end
 
-desc "Check puppet manifest syntax"
-task :syntax do
-  require 'puppet/face'
-  parser = Puppet::Face['parser', :current]
+require 'puppet-syntax/tasks/puppet-syntax'
+PuppetSyntax.exclude_paths ||= []
+PuppetSyntax.exclude_paths << "spec/fixtures/**/*.pp"
+PuppetSyntax.future_parser = true if ENV['FUTURE_PARSER'] == 'yes'
 
-  RakeFileUtils.send(:verbose, true) do
-    matched_files = FileList['**/*.pp'].exclude 'spec/fixtures/**/*.pp'
-
-    matched_files.to_a.each do |puppet_file|
-      parser.validate(puppet_file)
-    end
+desc "Check syntax of Ruby files and call :syntax and :metadata"
+task :validate do
+  Dir['lib/**/*.rb'].each do |lib_file|
+    sh "ruby -c #{lib_file}"
   end
+
+  Rake::Task[:syntax].invoke
+  Rake::Task[:metadata].invoke if File.exist?('metadata.json')
+end
+
+desc "Validate metadata.json file"
+task :metadata do
+  sh "metadata-json-lint metadata.json"
 end
 
 desc "Display the list of available rake tasks"
