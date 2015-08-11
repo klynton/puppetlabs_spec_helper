@@ -7,7 +7,7 @@ task :default => [:help]
 desc "Run spec tests on an existing fixtures directory"
 RSpec::Core::RakeTask.new(:spec_standalone) do |t|
   t.rspec_opts = ['--color']
-  t.pattern = 'spec/{classes,defines,unit,functions,hosts,integration}/**/*_spec.rb'
+  t.pattern = 'spec/{classes,defines,unit,functions,hosts,integration,types}/**/*_spec.rb'
 end
 
 desc "Run beaker acceptance tests"
@@ -28,14 +28,20 @@ def source_dir
 end
 
 def fixtures(category)
-  begin
-    fixtures = YAML.load_file(".fixtures.yml")["fixtures"]
-  rescue Errno::ENOENT
-    return {}
+  if File.exists?('.fixtures.yml')
+    fixtures_yaml = '.fixtures.yml'
+  elsif File.exists?('.fixtures.yaml')
+    fixtures_yaml = '.fixtures.yaml'
+  else
+    fixtures_yaml = ''
   end
 
-  if not fixtures
-    abort("malformed fixtures.yml")
+  begin
+    fixtures = YAML.load_file(fixtures_yaml)["fixtures"]
+  rescue Error::ENOENT
+    return {}
+  rescue Psych::SyntaxError => e
+    abort("Found malformed YAML in #{fixtures_yaml} on line #{e.line} column #{e.column}: #{e.problem}")
   end
 
   result = {}
@@ -65,6 +71,7 @@ def clone_repo(scm, remote, target, ref=nil, branch=nil)
     args.push(remote, target)
   when 'git'
     args.push('clone')
+    args.push('--depth 1') unless ref
     args.push('-b', branch) if branch
     args.push(remote, target)
   else
@@ -93,7 +100,7 @@ task :spec_prep do
   is_windows = !!File::ALT_SEPARATOR
   puppet_symlink_available = false
   begin
-    require 'puppet/file_system'
+    require 'puppet'
     puppet_symlink_available = Puppet::FileSystem.respond_to?(:symlink)
   rescue
   end
@@ -209,19 +216,28 @@ task :clean do
   FileUtils.rm_rf("pkg/")
 end
 
-desc "Check puppet manifests with puppet-lint"
-task :lint do
-  require 'puppet-lint/tasks/puppet-lint'
-  PuppetLint.configuration.relative = true
-  PuppetLint.configuration.disable_class_inherits_from_params_class
-  PuppetLint.configuration.ignore_paths ||= []
-  PuppetLint.configuration.ignore_paths << "spec/fixtures/**/*.pp"
-  PuppetLint.configuration.ignore_paths << "pkg/**/*.pp"
+require 'puppet-lint/tasks/puppet-lint'
+# Must clear as it will not override the existing puppet-lint rake task since we require to import for
+# the PuppetLint::RakeTask
+Rake::Task[:lint].clear
+# Relative is not able to be set within the context of PuppetLint::RakeTask
+PuppetLint.configuration.relative = true
+PuppetLint::RakeTask.new(:lint) do |config|
+  config.fail_on_warnings = true
+  config.disable_checks = [
+      '80chars',
+      'class_inherits_from_params_class',
+      'class_parameter_defaults',
+      'documentation',
+      'single_quote_string_with_variables']
+  config.ignore_paths = ["tests/**/*.pp", "vendor/**/*.pp","examples/**/*.pp", "spec/**/*.pp", "pkg/**/*.pp"]
 end
 
 require 'puppet-syntax/tasks/puppet-syntax'
 PuppetSyntax.exclude_paths ||= []
-PuppetSyntax.exclude_paths << "spec/fixtures/**/*.pp"
+PuppetSyntax.exclude_paths << "spec/fixtures/**/*"
+PuppetSyntax.exclude_paths << "pkg/**/*"
+PuppetSyntax.exclude_paths << "vendor/**/*"
 PuppetSyntax.future_parser = true if ENV['FUTURE_PARSER'] == 'yes'
 
 desc "Check syntax of Ruby files and call :syntax and :metadata"
@@ -236,7 +252,12 @@ end
 
 desc "Validate metadata.json file"
 task :metadata do
-  sh "metadata-json-lint metadata.json"
+  begin
+    require 'metadata_json_lint'
+    sh "metadata-json-lint metadata.json"
+  rescue LoadError => e
+    warn "Skipping metadata validation; the metadata-json-lint gem was not found"
+  end
 end
 
 desc "Display the list of available rake tasks"
